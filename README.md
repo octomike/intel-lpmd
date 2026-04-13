@@ -1,8 +1,19 @@
 # Intel Low Power Mode Daemon
 
-Intel Low Power Mode Daemon (lpmd) is a Linux daemon designed to optimize active idle power. It selects the most power-efficient CPUs based on a configuration file or CPU topology. Depending on system utilization and other hints, it puts the system into Low Power Mode by activating the power-efficient CPUs and disabling the rest, and restores the system from Low Power Mode by activating all CPUs.
+Intel Low Power Mode Daemon (lpmd) is a Linux daemon designed to optimize active
+idle power. It selects the most power-efficient CPUs based on a configuration
+file or CPU topology. Depending on system utilization and other hints, it puts
+the system into Low Power Mode by activating the power-efficient CPUs and
+disabling the rest, and restores the system from Low Power Mode by activating
+all CPUs.
 
-## Usage
+## Before You Start
+
+**Please note** that the installed configuration files serve as templates of
+best practices for specific platform models and disable lpmd by default. For
+LPMD to start the user is expected to either edit the main
+"intel_lpmd_config.xml" config file or after starting the program, enable LPMD
+by using the intel_lpmd_control tool.
 
 Refer to the man pages for command line arguments and XML configurations:
 
@@ -17,13 +28,13 @@ man intel_lpmd_config.xml
 ### Fedora
 
 ```sh
-dnf install automake autoconf-archive gcc glib2-devel dbus-glib-devel libxml2-devel libnl3-devel systemd-devel gtk-doc upower-devel
+dnf install automake autoconf-archive gcc glib2-devel libxml2-devel libnl3-devel systemd-devel gtk-doc upower-devel
 ```
 
 ### Ubuntu
 
 ```sh
-sudo apt install autoconf autoconf-archive gcc libglib2.0-dev libdbus-1-dev libdbus-glib-1-dev libxml2-dev libnl-3-dev libnl-genl-3-dev libsystemd-dev gtk-doc-tools libupower-glib-dev
+sudo apt install autoconf autoconf-archive gcc libglib2.0-dev libdbus-1-dev libxml2-dev libnl-3-dev libnl-genl-3-dev libsystemd-dev gtk-doc-tools libupower-glib-dev
 ```
 
 ### OpenSUSE
@@ -40,10 +51,13 @@ make
 sudo make install
 ```
 
-The generated artifacts are copied to respective directories under `/usr/local`. If a custom install path is preferred other than system default,  make sure `--localstatedir` and `--sysconfdir` are set to the right path that the system can understand. If installed via RPM then artifacts would be under `/usr`.
+The generated artifacts are copied to respective directories under `/usr/local`.
+If a custom install path is preferred other than system default,  make sure
+`--localstatedir` and `--sysconfdir` are set to the right path that the system
+can understand. If installed via RPM then artifacts would be under `/usr`.
 
-Example command for installation using prefix under `/opt/lpmd_install` dir with `--localstatedir` and `--sysconfdir` set to system default
-
+Example command for installation using prefix under `/opt/lpmd_install` dir with
+`--localstatedir` and `--sysconfdir` set to system default
 
 ```sh
 ./autogen.sh prefix=/opt/lpmd_install --localstatedir=/var --sysconfdir=/etc
@@ -87,8 +101,8 @@ Start `lpmd` using:
 sudo sh tests/lpm_test_interface.sh 4
 ```
 
-Run a workload and monitor `lpmd` to ensure it puts the system in the appropriate state based on the load.
-
+Run a workload and monitor `lpmd` to ensure it puts the system in the
+appropriate state based on the load.
 
 ## Releases
 
