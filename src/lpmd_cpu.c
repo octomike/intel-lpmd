@@ -26,6 +26,7 @@ static struct cpu_model_entry id_table[] = {
 		{ 6, 0xb5 }, // ArrowLake
 		{ 6, 0xbd }, // Lunarlake
 		{ 6, 0xcc }, // Pantherlake
+		{ 6, 0xd5 }, // Wildcatlake
 		{ 0, 0 } // Last Invalid entry
 };
 
@@ -116,13 +117,10 @@ int detect_supported_platform(struct lpmd_config_t *lpmd_config)
 	}
 
 end:
+	snprintf(lpmd_config->file_name, MAX_FILE_NAME_PATH, "%s", file_name);
 	lpmd_config->cpu_family = family;
 	lpmd_config->cpu_model = model;
 	lpmd_config->tdp = tdp;
-	if (file_name[0] != '\0')
-		strncpy(lpmd_config->file_name, file_name, MAX_FILE_NAME_PATH);
-	else
-		lpmd_config->file_name[0] = '\0';
 
 	return 0;
 }
@@ -226,6 +224,7 @@ int get_tdp(void)
 		if (strlen(entry->d_name) > 100)
 			continue;
 
+		/* Match intel-rapl:1, intel-rapl-mmio etc. */
 		if (strncmp(entry->d_name, "intel-rapl", strlen("intel-rapl")))
 			continue;
 
@@ -240,6 +239,7 @@ int get_tdp(void)
 		if (ret <= 0)
 			continue;
 
+		/* Match package-0, package-1 etc. */
 		if (strncmp(str, "package", strlen("package")))
 			continue;
 
@@ -346,8 +346,19 @@ int detect_cpu_topo(struct lpmd_config_t *lpmd_config)
 		set_max_online_cpu(i);
 	}
 
-	/* Here it is the first time we migrate CPUs, must clear the previous cgroup settings */
-	cgroup_cleanup();
+	/*
+	 * No cgroup_cleanup() here. It used to run at this point to clear
+	 * "previous cgroup settings", but this is called before the config file
+	 * has been parsed, so config->mode is not known yet and every mode paid
+	 * for it, including the ones that never touch a cpuset. What it did was
+	 * write the online CPU mask to system.slice, user.slice and
+	 * machine.slice, which is not a restore: it turns an inherited cpuset
+	 * into an explicit one and discards any AllowedCPUs= an administrator
+	 * had set there.
+	 *
+	 * Detecting the CPU topology must not change system state. Cleanup now
+	 * reverts only what this invocation actually wrote, on the way out.
+	 */
 
 	for (i = 0 ; i < CORE_TYPES_COUNT ; i++)
 		memset(lpmd_config->core_type_masks[i], 0, get_max_cpus() / 8);
@@ -372,7 +383,7 @@ int detect_cpu_topo(struct lpmd_config_t *lpmd_config)
 
 	lpmd_log_info("Detected %d Pcores, %d Ecores, %d Lcores, TDP %dW\n",
 		      pcores, ecores, lcores, lpmd_config->tdp);
-	ret = snprintf(lpmd_config->cpu_config, MAX_CONFIG_LEN - 1,
+	ret = snprintf(lpmd_config->cpu_config, MAX_CONFIG_LEN,
 		       " %dP%dE%dL-%dW ", pcores, ecores, lcores,
 		       lpmd_config->tdp);
 
@@ -403,7 +414,6 @@ static int detect_lpm_cpus_cluster(void)
 
 		snprintf(path, sizeof(path),
 			 "/sys/devices/system/cpu/cpu%d/topology/cluster_cpus_list", i);
-		path[MAX_STR_LENGTH - 1] = '\0';
 
 		filep = fopen(path, "r");
 		if (!filep)

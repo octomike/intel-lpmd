@@ -47,6 +47,14 @@ struct info_irqs {
 struct info_irqs info_irqs;
 struct info_irqs *info = &info_irqs;
 
+/*
+ * Set once the pre-restriction smp_affinity of every IRQ has been cached in
+ * info, so that a later low power state does not overwrite the cache with the
+ * already restricted affinities. It has to be cleared wherever the cache is
+ * cleared: the two are one piece of state.
+ */
+static int irq_updated;
+
 /* Interrupt Management */
 #define SOCKET_PATH "irqbalance"
 #define SOCKET_TMPFS "/run/irqbalance"
@@ -54,14 +62,9 @@ struct info_irqs *info = &info_irqs;
 static int irqbalance_ban_cpus(char *irq_str)
 {
 	char socket_cmd[MAX_STR_LENGTH];
-	int offset;
 
 	lpmd_log_debug("\tUpdate IRQ affinity (irqbalance)\n");
-	offset = snprintf(socket_cmd, MAX_STR_LENGTH, "settings cpus %s", irq_str);
-	if (offset >= MAX_STR_LENGTH)
-		offset = MAX_STR_LENGTH - 1;
-
-	socket_cmd[offset] = '\0';
+	snprintf(socket_cmd, MAX_STR_LENGTH, "settings cpus %s", irq_str);
 	socket_send_cmd(irq_socket_name, socket_cmd);
 
 	lpmd_log_debug("\tSend socket command %s\n", socket_cmd);
@@ -83,10 +86,22 @@ static int native_restore_irqs(void)
 		lpmd_write_str(path, str, LPMD_LOG_DEBUG);
 	}
 	memset(info, 0, sizeof(*info));
+	irq_updated = 0;
 	return 0;
 }
 
-static int irq_updated;
+/* Whether this IRQ's original affinity is in the cache, and so restorable. */
+static int irq_is_cached(int irq)
+{
+	int i;
+
+	for (i = 0; i < info->nr_irqs; i++) {
+		if (info->irq[i].irq == irq)
+			return 1;
+	}
+
+	return 0;
+}
 
 static int update_one_irq(int irq, char *irq_str)
 {
@@ -95,38 +110,53 @@ static int update_one_irq(int irq, char *irq_str)
 	size_t size = 0;
 	FILE *filep;
 
-	if (info->nr_irqs >= (MAX_IRQS - 1)) {
-		lpmd_log_error("Too many IRQs\n");
-		return -1;
-	}
-
 	snprintf(path, MAX_STR_LENGTH, "/proc/irq/%i/smp_affinity", irq);
 
-	if (!irq_updated) {
-		info->irq[info->nr_irqs].irq = irq;
-		filep = fopen(path, "r");
-		if (!filep)
-			return -1;
-
-		if (getline(&str, &size, filep) <= 0) {
-			lpmd_log_error("Failed to get IRQ%d smp_affinity\n", irq);
-			free(str);
-			fclose(filep);
+	/*
+	 * The cache is what makes the restore possible, so an IRQ that is not in
+	 * it is left alone rather than migrated with no way back. Once the cache
+	 * is populated that is a lookup, not a count: testing nr_irqs against
+	 * the limit here would refuse every IRQ on a machine whose IRQ count
+	 * filled the cache, so a second low power state would migrate nothing
+	 * and silently keep the first state's affinities.
+	 */
+	if (irq_updated) {
+		if (!irq_is_cached(irq)) {
+			lpmd_log_debug("\tIRQ%d not cached, not migrated\n", irq);
 			return -1;
 		}
 
-		fclose(filep);
-
-		snprintf(info->irq[info->nr_irqs].affinity, MAX_STR_LENGTH, "%s", str);
-
-		free(str);
-
-		/* Remove the Newline */
-		size = strnlen(info->irq[info->nr_irqs].affinity, MAX_STR_LENGTH);
-		info->irq[info->nr_irqs].affinity[size - 1] = '\0';
-
-		info->nr_irqs++;
+		return lpmd_write_str(path, irq_str, LPMD_LOG_DEBUG);
 	}
+
+	if (info->nr_irqs >= MAX_IRQS) {
+		lpmd_log_error("Too many IRQs, IRQ%d not migrated\n", irq);
+		return -1;
+	}
+
+	info->irq[info->nr_irqs].irq = irq;
+	filep = fopen(path, "r");
+	if (!filep)
+		return -1;
+
+	if (getline(&str, &size, filep) <= 0) {
+		lpmd_log_error("Failed to get IRQ%d smp_affinity\n", irq);
+		free(str);
+		fclose(filep);
+		return -1;
+	}
+
+	fclose(filep);
+
+	snprintf(info->irq[info->nr_irqs].affinity, MAX_STR_LENGTH, "%s", str);
+
+	free(str);
+
+	/* Remove the Newline */
+	size = strnlen(info->irq[info->nr_irqs].affinity, MAX_STR_LENGTH);
+	info->irq[info->nr_irqs].affinity[size - 1] = '\0';
+
+	info->nr_irqs++;
 
 	return lpmd_write_str(path, irq_str, LPMD_LOG_DEBUG);
 }
@@ -190,7 +220,16 @@ static int native_update_irqs(char *irq_str)
 
 	fclose(filep);
 
-	irq_updated = 1;
+	/*
+	 * Only claim the originals are cached if something actually went into
+	 * the cache. Setting this unconditionally hits the same problem a
+	 * missing reset does: the restore has nothing to put back, while every
+	 * later low power state believes the originals are already saved and so
+	 * never saves them.
+	 */
+	if (info->nr_irqs)
+		irq_updated = 1;
+
 	return 0;
 }
 
@@ -218,6 +257,31 @@ int process_irq(struct lpmd_config_state_t *state)
 	return 0;
 }
 
+/*
+ * Put IRQ affinity back on the way out.
+ *
+ * Without this, stopping the daemon while a low power state is active leaves
+ * every IRQ pinned to the low power CPUs for as long as the machine stays up,
+ * because nothing else moves them back. A state with IRQMigrate set to
+ * SETTING_RESTORE is the only thing that used to undo the migration, and there
+ * is no guarantee the daemon passes through one before it exits.
+ *
+ * Safe to call when nothing was migrated: the cache is empty and the restore
+ * loop does nothing. With irqbalance driving the migration the ban list is
+ * cleared instead, which is the same thing SETTING_RESTORE does.
+ */
+void irq_cleanup(void)
+{
+	if (irqbalance_pid == -1) {
+		if (!irq_updated)
+			return;
+		native_restore_irqs();
+		return;
+	}
+
+	irqbalance_ban_cpus("NULL");
+}
+
 int irq_init(void)
 {
 	DIR *dir;
@@ -233,6 +297,7 @@ int irq_init(void)
 		do {
 			entry = readdir(dir);
 			if (entry) {
+				/* Match patterns like irqbalance%d.sock */
 				if (!strncmp(entry->d_name, "irqbalance", 10)) {
 					ret = sscanf(entry->d_name, "irqbalance%d.sock", &irqbalance_pid);
 					if (!ret)
